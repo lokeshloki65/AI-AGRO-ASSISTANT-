@@ -3,7 +3,7 @@ An intelligent, full-stack web application designed to be a modern farmer's digi
 
 ✨ Core Features
 This platform is packed with features designed to assist farmers at every stage of their work:
-
+ 
 🤖 AI-Powered Crop Guide: Upload an image of a plant leaf and get an instant analysis of its health, potential diseases, and a complete guide covering soil, water, fertilizer, and pest control.
 
 🌦️ Real-time Weather Hub: Get current weather, hourly/daily forecasts, and air quality data for any location. It also includes access to historical weather data for the past 7 days.
