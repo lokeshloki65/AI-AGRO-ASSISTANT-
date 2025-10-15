@@ -23,7 +23,7 @@ This platform is packed with features designed to assist farmers at every stage 
 🛠️ Technology Stack 
 The application is built using a modern, robust set of technologies:
 
-Backend: Python with Flask
+Backend: Python with Flask 
 
 Frontend: HTML5, CSS3, JavaScript
 
