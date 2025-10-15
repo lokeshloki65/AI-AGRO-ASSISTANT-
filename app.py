@@ -10,8 +10,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-# --- NEW --- Import the required Google library
-from googleapiclient.discovery import build
+ from googleapiclient.discovery import build
    
 
 load_dotenv()
