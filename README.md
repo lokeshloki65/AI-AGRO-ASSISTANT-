@@ -20,7 +20,7 @@ This platform is packed with features designed to assist farmers at every stage 
 
 💬 Conversational AI Assistant: A helpful chatbot, powered by Google's Gemini, ready to answer any questions about the application's features.
 
-🛠️ Technology Stack
+🛠️ Technology Stack 
 The application is built using a modern, robust set of technologies:
 
 Backend: Python with Flask
