@@ -18,7 +18,7 @@ load_dotenv()
 app = Flask(__name__)  
 CORS(app)           
  
-  
+ 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
