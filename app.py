@@ -10,7 +10,8 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime, timedelta 
 from dotenv import load_dotenv
- from googleapiclient.discovery import build    
+from groq import Groq
+from googleapiclient.discovery import build    
     
    
 load_dotenv() 
@@ -19,14 +20,15 @@ app = Flask(__name__)
 CORS(app)           
  
  
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+client = Groq(api_key=GROQ_API_KEY)
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 DATA_GOV_API_KEY = os.getenv("DATA_GOV_API_KEY")
 FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH")
-# --- NEW --- Add these lines to get your Google Search API keys
 GOOGLE_CSE_API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+
 
 
 try:
@@ -63,8 +65,8 @@ except json.JSONDecodeError:
     print("ERROR: Could not decode prices.json. Check syntax.")
 
 
-MODEL_NAME = "gemini-1.5-flash-latest"
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
+TEXT_MODEL = "openai/gpt-oss-120b"
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 
 # --- NEW --- This is the helper function from your friend's code to find an image
@@ -105,8 +107,9 @@ def buyer_page():
 
 @app.route("/ask-agro-assistant", methods=["POST"])
 def ask_agro_assistant():
-    """Handles chatbot queries using the Gemini API."""
+    """Handles chatbot queries using the Groq API."""
     try:
+
         data = request.get_json()
         user_question = data.get("question", "").strip()
 
@@ -131,29 +134,160 @@ def ask_agro_assistant():
         Based on this information, please answer the user's question. If the question is unrelated to the Agro Assistant application or its features, politely state that you can only answer questions about the application.
         """
 
-        gemini_payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": system_prompt},
-                        {"text": f"User's question: {user_question}"}
-                    ]
-                }
-            ]
-        }
+        if not GROQ_API_KEY:
+            return jsonify({"error": "Groq API Key is missing in .env file."}), 500
 
-        response = requests.post(GEMINI_API_URL, json=gemini_payload, timeout=45)
-        response.raise_for_status()
-
-        result_text = response.json()['candidates'][0]['content']['parts'][0]['text']
-
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_question}
+            ],
+            temperature=0.7,
+            max_tokens=1024,
+        )
+        
+        result_text = completion.choices[0].message.content
         return jsonify({"answer": result_text})
 
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"Could not connect to the AI service: {e}"}), 503
     except Exception as e:
         print(f"CHATBOT ERROR: {e}")
         return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+
+@app.route("/voice-intelligence", methods=["POST"])
+def voice_intelligence():
+    """Processes voice transcripts using Groq for intent parsing and AI responses."""
+    try:
+        data = request.get_json()
+        transcript = data.get("transcript", "").strip()
+                
+        if not transcript:
+            return jsonify({"error": "No transcript provided."}), 400
+
+        # --- NEW --- Local Regex Fallback for common actions
+        def get_fallback_intent(txt):
+            txt = txt.lower()
+            if any(k in txt for k in ["weather", "வானிலை", "மழை", "forecast"]):
+                city_match = txt.split("in")[-1].strip() if "in" in txt else ""
+                return {"type": "command", "action": "weather", "params": {"city": city_match}, "answer": "Opening weather...", "speech": "Sure, let me check the weather."}
+            if any(k in txt for k in ["price", "விலை", "market", "market prices"]):
+                return {"type": "command", "action": "price", "answer": "Checking market prices...", "speech": "Sure, checking the latest commodity prices."}
+            if any(k in txt for k in ["planner", "திட்டம்", "plan", "guide"]):
+                return {"type": "command", "action": "planner", "answer": "Opening AI Planner...", "speech": "Switching to the farming planner."}
+            if any(k in txt for k in ["scan", "disease", "நோய்", "leaf"]):
+                return {"type": "command", "action": "disease", "answer": "Opening leaf scanner...", "speech": "Ready to scan for crop diseases."}
+            if any(k in txt for k in ["sell", "buy", "marketplace", "market"]):
+                return {"type": "command", "action": "buysell", "answer": "Opening marketplace...", "speech": "Taking you to the buy and sell section."}
+            return None
+
+        fallback = get_fallback_intent(transcript)
+
+        system_prompt = """
+        You are the 'Agro Intelligence' engine. Your job is to parse the user's voice transcript (which could be in English or Tamil) and determine if it's a 'command' to navigate the app or a 'question' to be answered.
+
+        **App Commands:**
+        - weather: Show weather results. Requires 'city'.
+        - disease: Navigate to Crop Guide (scan leaf).
+        - price: Navigate to Market Prices. Requires 'vegetable' and 'location'.
+        - planner: Navigate to AI Planner.
+        - news: Navigate to Agri News.
+        - loan: Navigate to Agri Loan.
+
+        **Response Format:**
+        Your response must be a single block of JSON.
+        {
+            "type": "command" or "answer",
+            "action": "weather", "disease", "price", "planner", "news", or "loan" (only if type is command),
+            "params": {"city": "...", "vegetable": "...", "location": "..."} (only if command needs them),
+            "answer": "Your concise AI response here" (if type is answer or if you want to 'speak' back the action),
+            "speech": "A natural sounding sentence to be spoken via TTS"
+        }
+
+        **Tamil Keywords Examples:**
+        - 'வானிலை' (Vannilai - Weather)
+        - 'மழை' (Mazhai - Rain/Weather)
+        - 'விலை' (Vilai - Price)
+        - 'திட்டம்' (Thittam - Planner)
+        - 'நோய்' (Noi - Disease)
+
+        **Example Action:**
+        - User: "Chennai la epo vannilai enna" (Tamil for what is the weather in Chennai)
+        - AI: {"type": "command", "action": "weather", "params": {"city": "Chennai"}, "answer": "Sure, showing weather for Chennai.", "speech": "Sure, showing weather for Chennai."}
+
+        **Example Question:**
+        - User: "How to kill tomato pests?"
+        - AI: {"type": "answer", "answer": "To manage tomato pests, use neem oil spray or organic soap water...", "speech": "You can manage tomato pests by using neem oil spray or organic soap water. I've sent the full details to the chat."}
+        """
+
+        if not GROQ_API_KEY:
+            if fallback: return jsonify(fallback)
+            return jsonify({"type": "answer", "answer": "Groq API Key missing in .env.", "speech": "I am missing the Groq API key."}), 500
+
+        # Try Groq
+        try:
+            completion = client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"User Transcript: {transcript}"}
+                ],
+                temperature=0.1, # Keep it strict for command parsing
+                max_tokens=512,
+                response_format={"type": "json_object"}
+            )
+            
+            result_json = completion.choices[0].message.content
+            return jsonify(json.loads(result_json))
+
+        except Exception as e:
+            print(f"Groq Fetch Exception: {e}")
+            if fallback: 
+                fallback["answer"] = "(Safe Mode) " + fallback["answer"]
+                return jsonify(fallback), 200
+            return jsonify({"type": "answer", "answer": "AI Engine busy. Using basic commands.", "speech": "My AI brain is busy, using basic navigation."}), 500
+
+    except Exception as e:
+        print(f"VOICE INTEL ERROR: {e}")
+        return jsonify({"type": "answer", "answer": f"Something went wrong while connecting to Groq: {str(e)}", "speech": "I am having trouble connecting to my brain right now."}), 500
+
+@app.route("/explain-results", methods=["POST"])
+def explain_results():
+    """Generates a natural language explanation for specific data (weather, prices, etc.)"""
+    try:
+        data = request.get_json()
+        context_type = data.get("type", "general")
+        raw_data = data.get("data", {})
+
+        system_prompt = f"""
+        You are the 'Agro Speaker'. Your task is to provide a friendly, detailed spoken summary of the provided {context_type} data.
+        If the data is in English, you can summarize in English but keep it natural. 
+        If the user context (Tamil) is detected, provide the explanation in Tamil (Tanglish or pure Tamil is fine, but make it very clear for a farmer).
+        The goal is to explain the most important details (e.g., temperature, rain chances, or market prices) out loud.
+        """
+
+        if not GROQ_API_KEY:
+            return jsonify({"explanation": f"Here is the {context_type} information. (AI summary unavailable)"})
+
+        # Try Groq
+        try:
+            completion = client.chat.completions.create(
+                model=TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Raw Data: {json.dumps(raw_data)}"}
+                ],
+                temperature=0.7,
+                max_tokens=1024,
+            )
+            
+            explanation = completion.choices[0].message.content
+            return jsonify({"explanation": explanation})
+        except Exception as e:
+            print(f"Explain Results Exception: {e}")
+            return jsonify({"explanation": f"I've updated the {context_type} for you. Look at the screen for more info."})
+
+    except Exception as e:
+        return jsonify({"explanation": "I'm sorry, I couldn't summarize the results right now."}), 500
 
 @app.route("/upload-item-image", methods=["POST"])
 def upload_item_image():
@@ -223,7 +357,7 @@ def get_items():
     if not db:
         return jsonify({"error": "Database not initialized"}), 500
     try:
-        products_ref = db.collection('products').stream()
+        products_ref = db.collection('products').limit(100).get()
         products_list = []
         for doc in products_ref:
             product_data = doc.to_dict()
@@ -273,64 +407,178 @@ def predict():
     if file.filename == '':
         return jsonify({"error": "No file selected"}), 400
 
+    source = request.form.get("source", "upload") # 'upload' or 'camera'
+    is_brief = request.form.get("brief", "false").lower() == "true"
+
     try:
         image_bytes = file.read()
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-        prompt_text = """
-        You are an expert agricultural scientist for Indian farming conditions. Analyze the provided plant leaf image and generate a complete, practical farming guide.
-        Your entire output must be a single block of human-readable plain text. Do NOT use JSON or markdown formatting.
-        Use the exact headings provided below, each on a new line, to structure your response.
+        prompt_text = f"""
+        You are an advanced AI Crop Disease Prediction Engine.
+        Analyze the provided leaf image and generate a structured, farmer-friendly diagnosis report.
+        
+        { "SOURCE: Analyzed using live camera image" if source == "camera" else "" }
+        
+        GENERAL RULES:
+        - Output must be clean, readable plain text.
+        - NO JSON, no markdown symbols (no asterisks, no hashes, no backticks).
+        - Use simple, professional, and practical language.
+        - Default language is English.
+        - Be short, sweet, and confident.
+        - End with: "This problem is common and controllable. Timely action will protect your crop."
 
-        ### DISEASE ANALYSIS ###
-        - Identify the disease on the leaf. If healthy, state "The leaf appears to be healthy."
-        - Provide 3 clear, step-by-step remedies for the disease.
+        { "MODE: BRIEF MODE. Show ONLY: Disease Name, Severity, What to Do Today, Medicine Name." if is_brief else "MODE: FULL ANALYSIS" }
 
-        ### HEALTHY LEAF TIPS ###
-        - If the leaf is healthy, provide 3 practical care tips for the plant. If it is diseased, skip this section entirely.
-        
-        ### SOIL SUITABILITY ###
-        - Describe the ideal soil type for this plant (e.g., Loamy, Sandy, Clay).
-        - State the optimal soil pH range (e.g., 6.0-7.0).
+        OUTPUT STRUCTURE (Use these exact headings in order):
 
-        ### WATERING GUIDE ###
-        - Provide a clear watering schedule (e.g., "Water deeply once a week, more in summer.").
-        - Mention a simple method to check for soil moisture.
-        
-        ### FERTILIZER RECOMMENDATION ###
-        - Suggest a suitable NPK ratio (e.g., 10-10-10) or type of organic manure.
-        - Specify when and how often to apply the fertilizer.
-        
-        ### PEST CONTROL ###
-        - List 2-3 common pests that affect this plant.
-        - For each pest, suggest one organic and one chemical control method.
-        
-        ### PLANTING GUIDE ###
-        - Recommend the ideal spacing between individual plants.
-        - Suggest the proper planting depth for seeds or saplings.
+        CROP IDENTIFICATION
+        - Crop name
+        - Confidence: High / Medium / Low
+
+        LEAF CONDITION
+        - Healthy / Disease Detected / Pest Attack / Nutrient Deficiency
+
+        DISEASE ANALYSIS
+        - Disease name
+        - Category: Fungal / Bacterial / Viral / Pest / Nutrient
+        - Stage: Early / Moderate / Severe
+
+        PRIORITY STATUS
+        🟢 Normal – no action needed (Use only if Healthy)
+        🟡 Watch – monitor closely (Use for Early stage or minor issues)
+        🔴 Urgent – treat immediately (Use for Moderate/Severe or high risk)
+
+        WHY THIS PROBLEM OCCURRED
+        - Briefly explain (Weather, Watering, Soil, or Pest reason).
+
+        KEY ACTION BLOCK
+        Disease Name:
+        Severity:
+        What to Do Today:
+        Medicine Name:
+
+        TREATMENT GUIDANCE
+        Organic Treatment:
+        - Remedy and Dosage.
+        Chemical Treatment:
+        - Indian medicine name, Dosage, and Spray interval.
+
+        DO NOT DO
+        - Common mistakes to avoid.
+
+        RECOVERY & PREVENTION
+        - Expected recovery time and signs of improvement.
+        - Simple prevention tips.
+
+        FINAL SHORT ADVICE
+        - 1–2 sentences of reassurance.
         """
 
-        gemini_payload = {
-            "contents": [{"parts": [{"inlineData": {"mime_type": "image/jpeg", "data": image_b64}}, {"text": prompt_text}]}]
-        }
+        completion = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_b64}",
+                            },
+                        },
+                    ],
+                }
+            ],
+            temperature=0.1,
+            max_tokens=2048,
+        )
 
-        response = requests.post(GEMINI_API_URL, json=gemini_payload, timeout=60)
-        response.raise_for_status()
-
-        gemini_response_data = response.json()
-        if 'candidates' not in gemini_response_data or not gemini_response_data['candidates']:
-            print(f"GEMINI API ERROR: No candidates returned. Response: {gemini_response_data}")
-            return jsonify({"error": "Gemini API did not provide a valid analysis."}), 500
-
-        prediction_report_text = gemini_response_data['candidates'][0]['content']['parts'][0]['text']
+        prediction_report_text = completion.choices[0].message.content
         return jsonify({"prediction_text": prediction_report_text})
 
-    except requests.exceptions.RequestException as e:
-        print(f"NETWORK/REQUEST ERROR: {e}")
-        return jsonify({"error": f"Failed to connect to the prediction service: {e}"}), 502
     except Exception as e:
         print(f"PREDICTION ERROR: {e}")
         return jsonify({"error": f"An unexpected error occurred on the server: {e}"}), 500
+
+@app.route("/translate-report", methods=["POST"])
+def translate_report():
+    """Translates the analysis report text into the target language."""
+    try:
+        data = request.get_json()
+        text = data.get("text", "")
+        target_lang = data.get("language", "English") # Tamil, Hindi, English
+
+        if not text:
+            return jsonify({"error": "No text provided"}), 400
+
+        prompt = f"""
+        Translate the following Crop Disease Analysis report into {target_lang}.
+        Maintain the "Govt agriculture style" and farmer-friendly tone.
+        Ensure all technical terms are explained simply.
+        Do not change the meaning or the structure of the report.
+        Keep the original headings but translated.
+        Output only the translated text, no other comments.
+
+        Report Text:
+        {text}
+        """
+
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=2048,
+        )
+
+        translated_text = completion.choices[0].message.content
+        return jsonify({"translated_text": translated_text})
+
+    except Exception as e:
+        print(f"TRANSLATION ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/ask-leaf-followup", methods=["POST"])
+def ask_leaf_followup():
+    """Handles follow-up questions related to the analyzed leaf."""
+    try:
+        data = request.get_json()
+        question = data.get("question", "")
+        report_context = data.get("report", "")
+
+        if not question or not report_context:
+            return jsonify({"error": "Missing question or report context"}), 400
+
+        prompt = f"""
+        The user has a follow-up question about their plant which was just analyzed.
+        Original Analysis:
+        {report_context}
+
+        User Question:
+        {question}
+
+        RULES:
+        - Answer ONLY related to this leaf & original result.
+        - Keep answers short and practical.
+        - Do not repeat the full report.
+        - Be supportive and clear.
+        - If the question is unrelated, politely redirect to the report.
+        """
+
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=512,
+        )
+
+        answer = completion.choices[0].message.content
+        return jsonify({"answer": answer})
+
+    except Exception as e:
+        print(f"FOLLOWUP ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/weather", methods=["GET"])
 def weather():
@@ -362,30 +610,122 @@ def weather():
             reverse_geo_response.raise_for_status()
             reverse_geo_data = reverse_geo_response.json()
             if reverse_geo_data:
-                final_city_name = reverse_geo_data[0]['name']
+                loc = reverse_geo_data[0]
+                final_city_name = f"{loc.get('name', 'Unknown')}, {loc.get('state', '')} {loc.get('country', '')}".strip(', ')
 
         if not lat or not lon:
             return jsonify({"error": "City name or latitude/longitude are required"}), 400
 
-        # Fetch detailed weather data
-        one_call_url = f"https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude=minutely&units=metric&appid={OPENWEATHER_API_KEY}"
-        weather_response = requests.get(one_call_url)
-        weather_response.raise_for_status()
-        weather_data = weather_response.json()
+        # Try OneCall 3.0 first (Modern/Detailed)
+        try:
+            one_call_url = f"https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude=minutely&units=metric&appid={OPENWEATHER_API_KEY}"
+            weather_response = requests.get(one_call_url, timeout=10)
+            weather_response.raise_for_status()
+            weather_data = weather_response.json()
+        except Exception as e:
+            print(f"OneCall 3.0 failed: {e}. Falling back to 2.5 API...")
+            # FALLBACK to 2.5 API (Standard/Legacy)
+            current_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&units=metric&appid={OPENWEATHER_API_KEY}"
+            forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&units=metric&appid={OPENWEATHER_API_KEY}"
+            
+            curr_res = requests.get(current_url, timeout=10)
+            curr_res.raise_for_status()
+            curr_data = curr_res.json()
+            
+            fore_res = requests.get(forecast_url, timeout=10)
+            fore_res.raise_for_status()
+            fore_data = fore_res.json()
+            
+            # Map 2.5 to OneCall format for frontend compatibility
+            weather_data = {
+                "lat": lat, "lon": lon,
+                "timezone": curr_data.get("name", "Unknown"),
+                "current": {
+                    "dt": curr_data["dt"],
+                    "temp": curr_data["main"]["temp"],
+                    "feels_like": curr_data["main"]["feels_like"],
+                    "humidity": curr_data["main"]["humidity"],
+                    "weather": curr_data["weather"],
+                    "wind_speed": curr_data["wind"]["speed"],
+                    "wind_deg": curr_data["wind"]["deg"],
+                    "sunrise": curr_data["sys"]["sunrise"],
+                    "sunset": curr_data["sys"]["sunset"],
+                    "visibility": curr_data.get("visibility", 10000),
+                    "uvi": 0 # Not available in 2.5
+                },
+                "hourly": [{"dt": i["dt"], "temp": i["main"]["temp"], "weather": i["weather"]} for i in fore_data["list"][:24]],
+                "daily": [{"dt": i["dt"], "temp": {"day": i["main"]["temp"], "night": i["main"]["temp"] - 5}, "weather": i["weather"]} for i in fore_data["list"][::8]]
+            }
 
         # Fetch air pollution data
-        air_pollution_url = f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}"
-        air_response = requests.get(air_pollution_url)
-        air_response.raise_for_status()
-        air_data = air_response.json()
+        try:
+            air_pollution_url = f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}"
+            air_response = requests.get(air_pollution_url, timeout=5)
+            air_response.raise_for_status()
+            air_data = air_response.json()
+            weather_data['air_quality'] = air_data.get('list', [{}])[0]
+        except Exception as ae:
+            print(f"Air pollution fetch failed: {ae}")
+            weather_data['air_quality'] = {"main": {"aqi": "N/A"}}
 
-        # Combine the data
-        weather_data['air_quality'] = air_data.get('list', [{}])[0]
         weather_data['city_name'] = final_city_name or weather_data.get('timezone', 'Unknown').split('/')[-1].replace('_', ' ')
+        weather_data['lat'] = lat
+        weather_data['lon'] = lon
+
+        # --- NEW: Ultimate Weather Intelligence Overhaul (V5) ---
+        current_hour = datetime.now().hour
+        is_night = current_hour < 6 or current_hour > 18
+        
+        # Calculate Moon Phase (Simplified approximation 0-1)
+        # 0 = New Moon, 0.25 = First Quarter, 0.5 = Full Moon, 0.75 = Last Quarter
+        def get_moon_phase(d):
+            diff = d - datetime(2001, 1, 1)
+            days = diff.days + diff.seconds / 86400.0
+            lunations = 0.20439731 + (days * 0.03386319269)
+            return lunations % 1.0
+
+        moon_phase_val = get_moon_phase(datetime.now())
+        moon_phase_name = "New Moon" if moon_phase_val < 0.06 or moon_phase_val > 0.94 else \
+                          "Waxing Crescent" if moon_phase_val < 0.25 else \
+                          "First Quarter" if moon_phase_val < 0.31 else \
+                          "Waxing Gibbous" if moon_phase_val < 0.5 else \
+                          "Full Moon" if moon_phase_val < 0.56 else \
+                          "Waning Gibbous" if moon_phase_val < 0.75 else \
+                          "Last Quarter" if moon_phase_val < 0.81 else "Waning Crescent"
+
+        humidity = weather_data['current'].get('humidity', 0)
+        temp = weather_data['current'].get('temp', 0)
+        dew_point = weather_data['current'].get('dew_point', temp - ((100 - humidity) / 5))
+        visibility = weather_data['current'].get('visibility', 10000) / 1000 # km
+        
+        temp_diff = abs(temp - dew_point)
+        fog_prob = 0
+        if temp_diff < 3:
+            fog_prob = min(90, (100 - (temp_diff * 30)) * (humidity / 100))
+        
+        # Frost Risk Calculation
+        frost_risk = "None"
+        if temp < 4 and temp_diff < 2: frost_risk = "Low"
+        if temp < 2: frost_risk = "Moderate"
+        if temp < 0: frost_risk = "High"
+
+        weather_data['intelligence'] = {
+            "is_night": is_night,
+            "fog_probability": f"{int(max(0, fog_prob))}%",
+            "night_temp_drop": f"{int(weather_data['daily'][0]['temp'].get('day', 0) - weather_data['daily'][0]['temp'].get('night', -5))}°C",
+            "uv_risk_level": "Low" if weather_data['current'].get('uvi', 0) < 3 else "Moderate" if weather_data['current'].get('uvi', 0) < 6 else "High",
+            "moon_phase": moon_phase_name,
+            "moon_phase_val": round(moon_phase_val, 2),
+            "visibility_km": f"{round(visibility, 1)}km",
+            "dew_point_c": f"{round(dew_point, 1)}°C",
+            "frost_risk": frost_risk,
+            "cloud_cover": f"{weather_data['current'].get('clouds', 0)}%"
+        }
 
         return jsonify(weather_data)
 
     except requests.exceptions.RequestException as e:
+        print(f"WEATHER ERROR (502): {e}")
         return jsonify({"error": f"Could not connect to weather service: {e}"}), 502
     except Exception as e:
         return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
@@ -454,6 +794,45 @@ def weather_history():
         return jsonify({"error": f"An unexpected error occurred while fetching history: {e}"}), 500
 
 
+@app.route("/weather-intelligence", methods=["POST"])
+def weather_intelligence():
+    """Generates AI insights and recommendations based on current weather."""
+    try:
+        data = request.get_json()
+        weather_info = data.get("weather", {})
+        city = data.get("city", "Unknown Location")
+
+        if not GROQ_API_KEY:
+            return jsonify({"error": "AI Engine unavailable"}), 500
+
+        prompt = f"""
+        You are an Advanced Weather Intelligence AI. Analyze this weather data for {city}:
+        Data: {json.dumps(weather_info)}
+
+        Provide a human-friendly response in the following JSON format:
+        {{
+            "summary": "A concise, conversational 2-sentence summary of the weather.",
+            "what_to_wear": "Specific clothing suggestions (e.g., 'Carry an umbrella', 'Wear light cotton').",
+            "health_tips": "Health/Safety advice based on AQI or UV (e.g., 'Use sunscreen', 'Stay hydrated').",
+            "agri_impact": "How this weather affects farmers today (e.g., 'Good for sowing', 'Risk of pests due to humidity').",
+            "fun_fact": "A quick educational fact about one of the current weather conditions."
+        }}
+        """
+
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            response_format={"type": "json_object"}
+        )
+
+        return jsonify(json.loads(completion.choices[0].message.content))
+
+    except Exception as e:
+        print(f"WEATHER INTEL ERROR: {e}")
+        return jsonify({"error": "Failed to generate AI insights"}), 500
+
+
 @app.route("/prices", methods=["GET"])
 def prices():
     """Fetches vegetable prices using a smart, two-step approach."""
@@ -493,21 +872,23 @@ def prices():
         pass
 
     try:
-        print("INFO: Real-time price not found. Using Gemini AI for estimation...")
+        print("INFO: Real-time price not found. Using Groq AI for estimation...")
         prompt = f"""
         As an agricultural market expert, provide a single, average estimated market price for '{vegetable_query}' in the '{location_query}' region of India.
         Your entire response MUST be only a single, valid JSON object with no markdown or any other text.
         Use this exact structure: {{"estimated_price": "Approx. ₹Z per Kg"}}
         """
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"response_mime_type": "application/json"}
-        }
-        gemini_response = requests.post(GEMINI_API_URL, json=payload, timeout=45)
-        gemini_response.raise_for_status()
+        
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"}
+        )
 
-        ai_data = gemini_response.json()
-        cleaned_text = ai_data['candidates'][0]['content']['parts'][0]['text']
+        cleaned_text = completion.choices[0].message.content
         price_data = json.loads(cleaned_text)
         estimated_price = price_data.get("estimated_price", "Could not estimate.")
 
@@ -526,7 +907,7 @@ def prices():
 
 @app.route("/vegetable-info", methods=["GET"])
 def vegetable_info():
-    """Fetches detailed information about a vegetable using the Gemini API."""
+    """Fetches detailed information about a vegetable using the Groq API."""
     vegetable_name = request.args.get('name', '').strip()
     if not vegetable_name:
         return jsonify({"error": "Vegetable name is required."}), 400
@@ -554,15 +935,16 @@ def vegetable_info():
         }}
         """
 
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"response_mime_type": "application/json"}
-        }
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3, # A bit more creative for descriptions
+            response_format={"type": "json_object"}
+        )
 
-        gemini_response = requests.post(GEMINI_API_URL, json=payload, timeout=45)
-        gemini_response.raise_for_status()
-
-        ai_data_text = gemini_response.json()['candidates'][0]['content']['parts'][0]['text']
+        ai_data_text = completion.choices[0].message.content
         veg_data = json.loads(ai_data_text)
         
         # --- MODIFIED SECTION ---
@@ -643,14 +1025,16 @@ def planner():
       }}
     }}
     """
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"response_mime_type": "application/json"}
-    }
     try:
-        response = requests.post(GEMINI_API_URL, json=payload, timeout=60)
-        response.raise_for_status()
-        plan_data_string = response.json()['candidates'][0]['content']['parts'][0]['text']
+        completion = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        plan_data_string = completion.choices[0].message.content
         return jsonify(json.loads(plan_data_string))
     except Exception as e:
         print(f"PLANNER ERROR: {e}")
