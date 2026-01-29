@@ -7,6 +7,8 @@ bson
 firebase-admin
 gunicorn
 python-dotenv
+groq
+
 
 
 
