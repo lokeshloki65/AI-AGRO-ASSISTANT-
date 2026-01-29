@@ -6,6 +6,9 @@ pymongo
 bson
 firebase-admin
 gunicorn
+python-dotenv
+
+
 
 
 
