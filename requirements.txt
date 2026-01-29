@@ -8,6 +8,8 @@ firebase-admin
 gunicorn
 python-dotenv
 groq
+google-api-python-client
+
 
 
 
